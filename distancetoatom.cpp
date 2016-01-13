@@ -2,7 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <gsl/gsl_histogram.h>
+#include <gsl/gsl_errno.h>
 #include <cmath>
+#include <QDebug>
 DistanceToAtom::DistanceToAtom(int size)
 {
     resize(size);
@@ -28,7 +30,6 @@ CellList DistanceToAtom::buildCellList(const QVector<QVector3D> &points, float s
     cellSize = cutoff;
     int numCells = size / cutoff;
     cellSize = size / numCells;
-
     cellList.resize(numCells, vector<vector<vector<int> > >(numCells, vector<vector<int> >(numCells)));
     for(int i=0; i<points.size(); i++) {
         const QVector3D &p = points[i];
@@ -46,6 +47,11 @@ CellList DistanceToAtom::buildCellList(const QVector<QVector3D> &points, float s
 
 void DistanceToAtom::compute(const QVector<QVector3D> &pointsOriginal, float cutoff)
 {
+    if(pointsOriginal.size() == 0) {
+        qDebug() << "DistanceToAtom::compute WARNING: input vector is empty.";
+        return;
+    }
+
     float min = 1e90;
     float max = -1e90;
     for(const QVector3D &point : pointsOriginal) {
@@ -57,6 +63,7 @@ void DistanceToAtom::compute(const QVector<QVector3D> &pointsOriginal, float cut
         max = std::max(max, point[1]);
         max = std::max(max, point[2]);
     }
+    max += 1e-5;
     const float systemSize = max - min;
 
     // Now translate all points
@@ -76,7 +83,8 @@ void DistanceToAtom::compute(const QVector<QVector3D> &pointsOriginal, float cut
         for(int j=0; j<m_size; j++) {
             for(int k=0; k<m_size; k++) {
                 const QVector3D voxelCenter((i+0.5)*voxelSize, (j+0.5)*voxelSize, (k+0.5)*voxelSize);
-                float minimumDistanceSquared = 1e50;
+                float minimumDistanceSquared0 = 1e10;
+                float minimumDistanceSquared = 1e10;
                 // Find the cell list where this position belongs and loop through all cells around
                 const int cx = voxelCenter[0] / cellSize;
                 const int cy = voxelCenter[1] / cellSize;
@@ -88,10 +96,7 @@ void DistanceToAtom::compute(const QVector<QVector3D> &pointsOriginal, float cut
                         for(int dz=-1; dz<=1; dz++) {
                             const vector<int> &pointsInCell = cellList[periodic(cx+dx, numCells)][periodic(cy+dy, numCells)][periodic(cz+dz, numCells)];
                             for(const int &pointIndex : pointsInCell) {
-                                QVector3D point = points[pointIndex];
-                                point[0] -= min;
-                                point[1] -= min;
-                                point[2] -= min;
+                                const QVector3D &point = points[pointIndex];
 
                                 const float distanceSquared = periodicDistanceSquared(point, voxelCenter, systemSize);
                                 minimumDistanceSquared = std::min(minimumDistanceSquared, distanceSquared);
@@ -99,8 +104,10 @@ void DistanceToAtom::compute(const QVector<QVector3D> &pointsOriginal, float cut
                         }
                     }
                 }
-
-                setValue(i,j,k,float(sqrt(minimumDistanceSquared)));
+                if(minimumDistanceSquared == minimumDistanceSquared0) {
+                    minimumDistanceSquared = -1;
+                }
+                setValue(i,j,k,float(minimumDistanceSquared));
             }
         }
     }
@@ -117,6 +124,7 @@ void DistanceToAtom::resize(int size)
 {
     m_size = size;
     m_values.resize(size*size*size);
+    for(float &v : m_values) { v = 0; }
     m_isValid = false;
 }
 
@@ -131,6 +139,11 @@ float DistanceToAtom::getValue(int i, int j, int k)
     return m_values[idx];
 }
 
+void DistanceToAtom::setValue(int i, int j, int k, float value)
+{
+    m_values[index(i,j,k)] = value;
+}
+
 QVector<QPointF> DistanceToAtom::histogram(int bins) {
     QVector<QPointF> histogramVector;
 
@@ -142,15 +155,18 @@ QVector<QPointF> DistanceToAtom::histogram(int bins) {
     float maxValue = 0;
 
     for(const float &val : m_values) {
-        minValue = std::min(minValue, val);
-        maxValue = std::max(maxValue, val);
+        if(val >= 0) {
+            minValue = std::min(minValue, val);
+            maxValue = std::max(maxValue, val);
+        }
     }
     gsl_histogram *hist = gsl_histogram_alloc (bins);
     gsl_histogram_set_ranges_uniform (hist, minValue, maxValue);
     for(const float &value : m_values) {
-        gsl_histogram_increment (hist, value);
+        if(value >= 0) {
+            gsl_histogram_increment (hist, sqrt(value));
+        }
     }
-
 
     histogramVector.resize(bins);
     for(int i=0; i<bins; i++) {
